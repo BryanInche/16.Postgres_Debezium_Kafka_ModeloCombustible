@@ -1,0 +1,120 @@
+1. Inicializar un Docker Compose (que tenga integrado zookeeper, kafka, debezium, postgress)
+# Nota>> Tambien podrias usar el docker-compose 11, que tendria un Kafka Ui
+
+docker-compose.yaml
+
+command: [ "postgres", "-c", "wal_level=logical", "-c", "max_wal_senders=1" , "-c", "max_replication_slots=1" ]
+#wal_level=logical → Habilita la replicación lógica, necesaria para Debezium.
+
+Ejecutar el siguiente comando para inicializar los servicios de Docker compose
+C:\Potgres_Debezium_Kafka>docker-compose -f "docker-compose.yml" up
+(-f permite usar un archivo específico )
+
+2. Ingresar al Postgress, mediante el Cliente PGAdmin o el PSQL o desde CMD
+
+## Verificar que en que puerto esta escuchando el Postgres
+## docker exec -it postgres sh
+## netstat -an | grep 5436
+
+## Si es necesario cambiar el puerto, lo hacemos desde config 
+## primero acceder al contenedor
+Acceder al contenedor:
+docker exec -it postgres bash
+vi /var/lib/postgresql/data/pg_hba.conf
+docker restart postgres
+
+C:\Users\BryanInche-MS4M>
+docker exec -it postgres psql -U postgres_bryan -d postgresdb -h localhost -p 5436
+
+LUEGO CREAMOS TABLAS, Por ejemplo
+
+CREATE TABLE clientes (
+  id VARCHAR(255),
+  nombre VARCHAR(255),
+  pais INT
+);
+
+
+3. Configurando el conector Debezium para capturar cambios en una base de datos PostgreSQL y enviarlos a Kafka
+(CDC - Change Data Capture) 
+
+
+### Previo, podemos listar los conectores 
+### curl -X GET http://localhost:8083/connectors/
+
+### Ver configuración de un conector
+### curl -X GET http://localhost:8083/connectors/{nombre}/config
+
+-X PUT → Método HTTP PUT para crear/actualizar la configuración del conector.
+-H "Content-Type: application/json" → Especifica que los datos enviados son de tipo JSON.
+--data "..." → Contiene la configuración del conector en formato JSON.
+http://localhost:8083/connectors/postgres-connector-bryan/config → URL del servicio Kafka Connect donde se configura el conector.
+
+"connector.class": "io.debezium.connector.postgresql.PostgresConnector"	#Indica que se usará el conector de Debezium 									#para PostgreSQL.
+"database.server.name": "postgres"  # Nombre lógico del servidor en Kafka. Se usará en los topics generados.
+"database.hostname": "postgres"	# Dirección del servidor de PostgreSQL (aquí está dentro de Docker, por eso usa   				#"postgres").
+
+"name": "postgres-connector-bryan" #	Nombre del conector en Kafka Connect.
+
+# Comando a ejecutar
+# Usa PUT para enviar la configuración al endpoint:
+#👉 http://localhost:8083/connectors/postgres-connector-bryan/config
+#📌 ¿Qué hace?
+# Modifica un conector ya existente (postgres-connector-bryan).
+
+C:\Users\BryanInche-MS4M>curl -X PUT -H "Content-Type: application/json" --data "{\"connector.class\": \"io.debezium.connector.postgresql.PostgresConnector\", \"database.user\": \"postgres_bryan\", \"database.dbname\": \"postgresdb\", \"database.server.name\": \"postgres\", \"database.hostname\": \"postgres\", \"database.port\": \"5436\", \"plugin.name\": \"pgoutput\", \"key.converter.schemas.enable\": \"false\", \"topic.prefix\": \"postgresdb\", \"decimal.handling.mode\": \"double\", \"database.password\": \"postgres_simple\", \"value.converter.schemas.enable\": \"false\", \"name\": \"postgres-connector-bryan\", \"value.converter\": \"org.apache.kafka.connect.json.JsonConverter\", \"key.converter\": \"org.apache.kafka.connect.json.JsonConverter\", \"snapshot.mode\": \"initial\"}" http://localhost:8083/connectors/postgres-connector-bryan/config
+
+OUTPUT (Si todo ha salido bien)
+{"name":"postgres-connector-bryan","config":{"connector.class":"io.debezium.connector.postgresql.PostgresConnector","database.user":"postgres_bryan","database.dbname":"postgresdb","database.server.name":"postgres","database.hostname":"postgres","database.port":"5436","plugin.name":"pgoutput","key.converter.schemas.enable":"false","topic.prefix":"postgresdb","decimal.handling.mode":"double","database.password":"postgres_simple","value.conve
+
+VS 
+# Usa POST para enviar la configuración al endpoint:
+#👉 http://localhost:8083/connectors/
+#📌 ¿Qué hace?
+#Crea un nuevo conector llamado postgres-connector.
+#Si ya existe un conector con ese nombre, da error.
+
+# En POSTMAN
+curl -X POST -H "Accept:application/json" -H "Content-Type:aplication/json" localhost:8083/connectors/ -d '
+{
+    "name": "postgres-connector",
+    "config": {
+        "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+        "database.hostname": "postgres",    // IP del host externo
+        "database.port": "5436",                 // Puerto de PostgreSQL
+        "database.user": "postgres_bryan",           // Usuario de la base de datos
+        "database.password": "postgres_simple",        // Contraseña de la base de datos
+        "database.dbname": "postgresdb",    // Nombre de la base de datos
+        "database.server.name": "postgres",
+        "plugin.name": "pgoutput"
+    }
+ }
+
+# En CMD
+curl -X POST -H "Accept: application/json" -H "Content-Type: application/json" ^
+http://localhost:8083/connectors/ -d "{ \"name\": \"postgres-connector\", \"config\": { \"connector.class\": \"io.debezium.connector.postgresql.PostgresConnector\", \"database.hostname\": \"postgres\", \"database.port\": \"5436\", \"database.user\": \"postgres_bryan\", \"database.password\": \"postgres_simple\", \"database.dbname\": \"postgresdb\", \"database.server.name\": \"postgres\", \"plugin.name\": \"pgoutput\" } }"
+
+
+4. VALIDACION Y PROBAR QUE ESTE FUNCIONANDO Postgress, Debezium, Kafka
+
+4.1 Conectarse al contenedor del Kafka()
+C:\Users\BryanInche-MS4M>
+docker exec -it kafka /bin/bash
+
+## Antes, podemos listar los topicos
+kafka-topics.sh --bootstrap-server localhost:9092 --list
+
+4.2 Conectarse al Topic de Kafka
+kafka-console-consumer.sh --bootstrap-server kafka:9092 --topic postgresbd.public.clientes --from-beginning
+
+
+4.3 Validacion
+INSERT INTO clientes (id, nombre, pais) VALUES (6532, 'shagy', 'venezuela');
+INSERT 0 1
+
+UPDATE clientes SET pais = 'colombia' WHERE id = 6532;
+
+DELETE FROM clientes WHERE id = 6532;
+
+CONTINUE --  BUSCAR UNA BD COSUMER(REDIS, MINIO, ETC)
+
